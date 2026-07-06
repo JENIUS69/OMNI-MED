@@ -1,0 +1,183 @@
+import time
+import threading
+import speech_recognition as sr
+import cv2
+import mediapipe as mp
+
+class OmniMedVoiceVisionTester:
+    def __init__(self):
+        # --- Audio Setup ---
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        
+        self.rolling_memory = []
+        self.TARGET_KEYWORDS = ["heart attack", "code blue", "heparin", "epinephrine", "anaphylaxis", "stroke"]
+        
+        # --- Vision Setup ---
+        self.mp_hands = mp.solutions.hands
+        self.mp_draw = mp.solutions.drawing_utils
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+        
+        self.heart_gesture_start_time = None
+        self.vision_alert_triggered = False
+        self.is_running = True
+
+    def clean_expired_memory(self):
+        current_time = time.time()
+        self.rolling_memory = [chunk for chunk in self.rolling_memory if (current_time - chunk[1]) <= 20.0]
+
+    def scan_for_keywords(self):
+        combined_text = " ".join([chunk[0] for chunk in self.rolling_memory])
+        if not combined_text.strip():
+            return
+            
+        print(f"\n⏳ [20s ACTIVE MEMORY] : \"{combined_text}\"")
+        found_keywords = [kw.upper() for kw in self.TARGET_KEYWORDS if kw in combined_text]
+        
+        if found_keywords:
+            print(f"🎯 [AUDIO MATCH FOUND] Detected: {found_keywords}")
+        else:
+            print("🔍 [AUDIO SCANNING] No matching medical keywords.")
+
+    def start_microphone_stream(self):
+        print("[INIT] Calibrating microphone... Ek second ruko.")
+        with self.microphone as source:
+            self.recognizer.adjust_for_ambient_noise(source, duration=2)
+        print("[ACTIVE] Mic Ready!\n")
+
+        while self.is_running:
+            try:
+                with self.microphone as source:
+                    audio_data = self.recognizer.listen(source, phrase_time_limit=4)
+                raw_text = self.recognizer.recognize_google(audio_data).lower()
+                if raw_text.strip():
+                    self.rolling_memory.append((raw_text, time.time()))
+                    print(f"🎙️ [MIC CAPTURED] Heard: '{raw_text}'")
+            except sr.UnknownValueError:
+                continue
+            except sr.RequestError:
+                time.sleep(2)
+
+    def continuous_brain_scanner(self):
+        while self.is_running:
+            time.sleep(2)
+            self.clean_expired_memory()
+            self.scan_for_keywords()
+
+    def start_camera_stream(self):
+        """Auto-detects Iriun camera index and launches the live tracking window."""
+        cap = None
+        # Index 0 se 3 tak auto scan karega active feed dhoondhne ke liye
+        for index in [0, 1, 2, 3]:
+            print(f"[CAMERA] Index {index} check kar rahe hain...")
+            test_cap = cv2.VideoCapture(index)
+            if test_cap.isOpened():
+                ret, frame = test_cap.read()
+                if ret:
+                    cap = test_cap
+                    print(f"✅ Working Camera mil gaya Index: {index}!")
+                    break
+            test_cap.release()
+
+        if cap is None:
+            print("[CRITICAL ERROR] Koi camera nahi mila! Make sure Iriun app is connected on phone.")
+            self.is_running = False
+            return
+        
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # Window create karna clear pop up ke liye
+        cv2.namedWindow("OmniMed Tracker Window", cv2.WINDOW_AUTOSIZE)
+
+        while cap.isOpened() and self.is_running:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            h, w, c = frame.shape
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # --- CHEST AREA ZONE (CENTER OF SCREEN) ---
+            box_x_start, box_x_end = int(w * 0.30), int(w * 0.70)
+            box_y_start, box_y_end = int(h * 0.40), int(h * 0.85)
+            
+            results = self.hands.process(rgb_frame)
+            hand_inside_box = False
+
+            if results.multi_hand_landmarks:
+                for hand_lms in results.multi_hand_landmarks:
+                    # YEH LINE SCREEN PAR HAND SKELETON AUR SENSORS LINES DRAW KAREGI
+                    self.mp_draw.draw_landmarks(frame, hand_lms, self.mp_hands.HAND_CONNECTIONS)
+                    
+                    # Track index finger knuckle as the hand position
+                    hand_x = int(hand_lms.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP].x * w)
+                    hand_y = int(hand_lms.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP].y * h)
+                    
+                    # Check if hand goes inside the chest region
+                    if (box_x_start <= hand_x <= box_x_end) and (box_y_start <= hand_y <= box_y_end):
+                        hand_inside_box = True
+
+            # --- 5 SECOND TIMING LOGIC ---
+            if hand_inside_box:
+                if not self.vision_alert_triggered:
+                    if self.heart_gesture_start_time is None:
+                        self.heart_gesture_start_time = time.time()
+                        print("[TIMER] Hand on Chest detected. Starting 5s countdown...")
+                    
+                    elapsed = time.time() - self.heart_gesture_start_time
+                    
+                    if elapsed >= 5.0:
+                        self.vision_alert_triggered = True
+                        self.heart_gesture_start_time = None
+                        print("\n🎯 [VISION ALERT] Hand held on chest for 5 seconds! Alarm Triggered!")
+                    else:
+                        cv2.rectangle(frame, (box_x_start, box_y_start), (box_x_end, box_y_end), (0, 165, 255), 3)
+                        cv2.putText(frame, f"CHEST HOLD: {elapsed:.1f}s / 5.0s", (box_x_start - 10, box_y_start - 15), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+            else:
+                if not self.vision_alert_triggered and self.heart_gesture_start_time is not None:
+                    print("[TIMER RESET] Hand removed from chest.")
+                self.heart_gesture_start_time = None
+                if not results.multi_hand_landmarks:
+                    self.vision_alert_triggered = False
+
+            # --- UI DRAWING STATES ---
+            if self.vision_alert_triggered:
+                cv2.rectangle(frame, (box_x_start, box_y_start), (box_x_end, box_y_end), (0, 0, 255), 4)
+                cv2.putText(frame, "CRITICAL ALERT: EMERGENCY CHEST PAIN", (15, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            else:
+                if not hand_inside_box:
+                    cv2.rectangle(frame, (box_x_start, box_y_start), (box_x_end, box_y_end), (0, 255, 0), 2)
+                    cv2.putText(frame, "CHEST DETECTION ZONE", (box_x_start, box_y_start - 15), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            # Force window to show frame
+            cv2.imshow("OmniMed Tracker Window", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self.is_running = False
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    def boot(self):
+        t_mic = threading.Thread(target=self.start_microphone_stream, daemon=True)
+        t_brain = threading.Thread(target=self.continuous_brain_scanner, daemon=True)
+        
+        t_mic.start()
+        t_brain.start()
+        
+        self.start_camera_stream()
+
+if __name__ == "__main__":
+    tester = OmniMedVoiceVisionTester()
+    tester.boot()
