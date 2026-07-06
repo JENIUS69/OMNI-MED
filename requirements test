@@ -1,0 +1,1 @@
+python -c "import mediapipe as mp; import cv2; import speech_recognition as sr; print('ENVIRONMENT READY!')"
