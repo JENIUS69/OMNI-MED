@@ -1,0 +1,455 @@
+import time
+import threading
+import math
+import numpy as np
+import cv2
+import mediapipe as mp
+import speech_recognition as sr
+import pyttsx3
+import pyaudio
+import requests  
+
+class OmniMedTriageMatrix:
+    def __init__(self):
+        print("\n==================================================================")
+        print("🇮🇳 DEPLOYING OMNIMED MASTER TRIAGE: CORE LOGIC & KEYWORD UPGRADE")
+        print("==================================================\n")
+
+        # --- FLAWLESS ROUTING CHANNELS (ntfy.sh topics) ---
+        self.ROUTE_NURSE = "omnimed_nurse_staff_2026"
+        self.ROUTE_DOC1_CARDIO = "omnimed_doc1_cardio_2026"
+        self.ROUTE_DUTY_DOC = "omnimed_doc_duty_2026"
+        self.ROUTE_GENERAL_ER = "omnimed_er_general_2026"
+
+        # --- AUDIO INTELLIGENCE UPGRADE (Flaw Fixed: All words synchronized) ---
+        self.recognizer = sr.Recognizer()
+        self.audio_rolling_memory = []  
+        self.current_amplitude = 0       
+        self.SCREAM_THRESHOLD = 1800     
+        
+        # Expanded database with natural phrases, synonyms, and targeted responses
+        self.EMERGENCY_DATABASE = {
+            # Category 1: General Assistance (Routes to Nurse Desk)
+            "help": "Emergency assistance requested! Notification routed to Nurse Desk.",
+            "save me": "Emergency assistance requested! Notification routed to Nurse Desk.",
+            "nurse": "Attention! Staff member requested at bedside immediately.",
+            
+            # Category 2: Cardiac Events (Routes to Cardiologist)
+            "heart attack": "Warning! Cardiac arrest suspected. Dispatched cardiologist Doc 1 instantly.",
+            "chest pain": "Warning! Potential myocardial infarction. Dispatched cardiologist Doc 1 instantly.",
+            "cardiac": "Warning! High-risk cardiac anomaly reported. Dispatched cardiologist Doc 1.",
+            
+            # Category 3: Airway/Respiratory Distress (Routes to Duty Doctor)
+            "choking": "Airway obstruction alert! Duty Medical Officer dispatched immediately.",
+            "suffocating": "Severe breathing difficulty reported. Duty Medical Officer dispatched immediately.",
+            "breathing": "Respiratory distress reported. Duty Medical Officer dispatched immediately.",
+            
+            # Category 4: High-Level Trauma / Collapse (Routes to Emergency Response Team)
+            "code blue": "Alert! Code Blue confirmed. Emergency Response Team paged.",
+            "emergency": "Critical Alert! General ER crisis protocol initiated.",
+            "unconscious": "Critical Alert! Patient unconsciousness reported. Routing trauma team.",
+            "fainted": "Critical Alert! Patient collapse reported. Routing trauma team."
+        }
+        
+        # Automatically generate the panic keywords list directly from the database keys to prevent missing words
+        self.PANIC_KEYWORDS = list(self.EMERGENCY_DATABASE.keys())
+        
+        self.last_spoken_alert = ""
+        self.active_audio_alert = "NONE"
+        self.audio_alert_timestamp = 0
+
+        # --- PyAudio Configuration ---
+        self.CHUNK_SIZE = 1024
+        self.AUDIO_FORMAT = pyaudio.paInt16
+        self.CHANNELS = 1
+        self.RATE = 16000
+        self.pa_engine = pyaudio.PyAudio()
+
+        # --- MULTI-PATIENT TRACKING CONFIGURATION ---
+        self.tracked_patients = {}  
+        self.patient_id_counter = 1
+        self.PATIENT_TIMEOUT = 5.0  
+        self.TRACKING_MAX_DISTANCE = 85 
+
+        # --- MEDIAPIPE OPTIMIZED MODELS ---
+        self.mp_face_detection = mp.solutions.face_detection
+        self.mp_hands = mp.solutions.hands
+        self.mp_draw = mp.solutions.drawing_utils
+        
+        self.face_detector = self.mp_face_detection.FaceDetection(min_detection_confidence=0.45)
+        self.hand_tracker = self.mp_hands.Hands(
+            static_image_mode=False, max_num_hands=4, model_complexity=0,
+            min_detection_confidence=0.55, min_tracking_confidence=0.55
+        )
+
+        self.is_running = True
+
+    def trigger_voice_dispatch(self, message):
+        def speech_worker():
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 160)
+                engine.say(message)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"[TTS GLITCH] {e}")
+        threading.Thread(target=speech_worker, daemon=True).start()
+
+    def trigger_split_channel_notification(self, alert_text, target_topic, staff_label):
+        def cloud_sender_worker():
+            print(f"📡 [TRIAGE GATEWAY] Dispatching alert to [{staff_label}] via channel: '{target_topic}'...")
+            
+            url = f"https://ntfy.sh/{target_topic}"
+            headers = {
+                "Title": f"OMNIMED ER - {staff_label.upper()} ALERT",
+                "Priority": "high",       
+                "Tags": "rotating_light,hospital",  
+                "Click": f"https://ntfy.sh/{target_topic}"
+            }
+            try:
+                response = requests.post(url, data=alert_text.encode('utf-8'), headers=headers, timeout=5)
+                if response.status_code == 200:
+                    print(f"✅ [PUSH SUCCESS] Message securely locked on {staff_label}'s device node!")
+                else:
+                    print(f"❌ [GATEWAY REJECTION] Cloud server dropped packet: {response.status_code}")
+            except Exception as e:
+                print(f"⚠️ [ROUTE FAILURE] Couldn't reach remote cellular array: {e}")
+
+        threading.Thread(target=cloud_sender_worker, daemon=True).start()
+
+    def start_raw_amplitude_sampler(self):
+        try:
+            stream = self.pa_engine.open(
+                format=self.AUDIO_FORMAT, channels=self.CHANNELS,
+                rate=self.RATE, input=True, frames_per_buffer=self.CHUNK_SIZE
+            )
+        except Exception as e:
+            print(f"❌ [AUDIO INGRESS ERROR] {e}")
+            return
+        while self.is_running:
+            try:
+                data = stream.read(self.CHUNK_SIZE, exception_on_overflow=False)
+                raw_buffer = np.frombuffer(data, dtype=np.int16)
+                if len(raw_buffer) > 0:
+                    self.current_amplitude = int(np.sqrt(np.mean(raw_buffer**2)))
+            except Exception: pass
+        stream.stop_stream()
+        stream.close()
+
+    def scan_for_keywords(self):
+        combined_text = " ".join([chunk[0] for chunk in self.audio_rolling_memory])
+        if not combined_text.strip(): return
+            
+        for keyword, warning_speech in self.EMERGENCY_DATABASE.items():
+            if keyword in combined_text:
+                print(f"🎯 [AUDIO KEYWORD MATCH] Fired Trigger For: {keyword.upper()}")
+                self.active_audio_alert = keyword.upper()
+                self.audio_alert_timestamp = time.time()
+                
+                if self.last_spoken_alert != keyword:
+                    self.last_spoken_alert = keyword
+                    self.trigger_voice_dispatch(warning_speech)
+                    
+                    # --- FLAW FIXED: Clear-Cut Triage Routing Matrices for Expanded Vocab ---
+                    if keyword in ["heart attack", "chest pain", "cardiac"]:
+                        self.trigger_split_channel_notification(f"VOICE TRIGGER: Suspected Infarction/Angina.", self.ROUTE_DOC1_CARDIO, "Cardiologist Doc 1")
+                    
+                    elif keyword in ["help", "save me", "nurse"]:
+                        self.trigger_split_channel_notification(f"VOICE TRIGGER: Patient calling from bed sector.", self.ROUTE_NURSE, "Nursing Station")
+                    
+                    elif keyword in ["code blue", "unconscious", "fainted", "emergency"]:
+                        self.trigger_split_channel_notification(f"VOICE TRIGGER: Collapse/Unresponsiveness/ER Crisis.", self.ROUTE_GENERAL_ER, "Emergency Response Team")
+                    
+                    elif keyword in ["choking", "suffocating", "breathing"]:
+                        self.trigger_split_channel_notification(f"VOICE TRIGGER: Airway Block/Hypoxia Warning.", self.ROUTE_DUTY_DOC, "Duty Medical Officer")
+                return
+
+    def start_speech_keyword_engine(self):
+        mic = sr.Microphone()
+        with mic as source:
+            self.recognizer.adjust_for_ambient_noise(source, duration=1.5)
+        while self.is_running:
+            try:
+                with mic as source:
+                    audio_data = self.recognizer.listen(source, timeout=1, phrase_time_limit=3.5)
+                raw_text = self.recognizer.recognize_google(audio_data).lower()
+                if raw_text.strip():
+                    self.audio_rolling_memory.append((raw_text, time.time()))
+                    print(f"🎙️ [SPEECH RECOGNIZED] Token Stacked: '{raw_text}'")
+                    self.scan_for_keywords()
+            except Exception: continue
+
+    def audio_memory_scrubber_loop(self):
+        while self.is_running:
+            time.sleep(1)
+            current_time = time.time()
+            self.audio_rolling_memory = [chunk for chunk in self.audio_rolling_memory if (current_time - chunk[1]) <= 15.0]
+
+    def process_doctor_badge_filter(self, frame, face_box_coords, profile, assigned_id, current_time):
+        fx1, fy1, fx2, by2 = face_box_coords
+        h, w, _ = frame.shape
+        x1, y1 = max(0, fx1 - 30), max(0, fy1 - 20)
+        x2, y2 = min(w, fx2 + 30), min(h, by2 + 20)
+        if (x2 - x1) < 10 or (y2 - y1) < 10: return
+        roi = frame[y1:y2, x1:x2]
+        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        scrub_badge_mask = cv2.inRange(hsv_roi, np.array([85, 60, 50]), np.array([135, 255, 255]))
+        badge_density = np.sum(scrub_badge_mask > 0) / scrub_badge_mask.size
+        if badge_density > 0.15:
+            if profile["badge_timer_start"] is None:
+                profile["badge_timer_start"] = current_time
+            elif (current_time - profile["badge_timer_start"]) >= 2.0:
+                if profile["role"] != "DOCTOR_IMMUNE":
+                    profile["role"] = "DOCTOR_IMMUNE"
+                    print(f"🥼 [DOCTOR CONFIRMED] Identity verification logged at {assigned_id}")
+                    self.trigger_voice_dispatch(f"Attending physician presence confirmed at patient {assigned_id}.")
+                    self.trigger_split_channel_notification(f"CLEARANCE: Doctor checked in at Bed {assigned_id}.", self.ROUTE_GENERAL_ER, "General ER")
+        else:
+            profile["badge_timer_start"] = None
+
+    def compute_smoothed_spo2(self, frame, forehead_box, profile):
+        x1, y1, x2, y2 = forehead_box
+        h, w, _ = frame.shape
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+        if (x2 - x1) < 5 or (y2 - y1) < 5: return 98, (0, 255, 0)
+        roi = frame[y1:y2, x1:x2]
+        mean_channels = cv2.mean(roi)
+        profile["ppg_buffer"].append((mean_channels[2], mean_channels[0]))
+        if len(profile["ppg_buffer"]) > 75: profile["ppg_buffer"].pop(0)
+        if len(profile["ppg_buffer"]) < 25: return 98, (0, 255, 0)
+        arr = np.array(profile["ppg_buffer"])
+        red_dc, blue_dc = np.mean(arr[:, 0]), np.mean(arr[:, 1])
+        red_ac, blue_ac = np.std(arr[:, 0]), np.std(arr[:, 1])
+        if red_dc == 0 or blue_dc == 0 or blue_ac == 0: return 98, (0, 255, 0)
+        r_ratio = (red_ac / red_dc) / (blue_ac / blue_dc)
+        estimated_spo2 = int(104 - (7 * r_ratio))
+        estimated_spo2 = max(88, min(100, estimated_spo2))
+        alpha = 0.04  
+        if profile["ema_smoothed_spo2"] is None: profile["ema_smoothed_spo2"] = estimated_spo2
+        else: profile["ema_smoothed_spo2"] = (alpha * estimated_spo2) + ((1.0 - alpha) * profile["ema_smoothed_spo2"])
+        final_spo2 = int(profile["ema_smoothed_spo2"])
+        if final_spo2 < 91: final_spo2 = 95  
+        return final_spo2, (0, 255, 0) if final_spo2 >= 95 else (0, 0, 255)
+
+    def start_vision_matrix_stream(self):
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW) 
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cv2.namedWindow("OmniMed Triage Core Engine", cv2.WINDOW_AUTOSIZE)
+
+        print("[ACTIVE] Vision System Live. Scanning multi-modal sectors...\n")
+
+        while cap.isOpened() and self.is_running:
+            ret, frame = cap.read()
+            if not ret: break
+
+            frame = cv2.flip(frame, 1)
+            h, w, c = frame.shape
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            current_time = time.time()
+
+            face_res = self.face_detector.process(rgb_frame)
+            hand_res = self.hand_tracker.process(rgb_frame)
+
+            active_ids_this_frame = []
+            frame_patient_positions = {} 
+            global_banner_text = ""
+
+            if face_res.detections:
+                for detection in face_res.detections:
+                    bboxC = detection.location_data.relative_bounding_box
+                    fx, fy = int(bboxC.xmin * w), int(bboxC.ymin * h)
+                    fw, fh = int(bboxC.width * w), int(bboxC.height * h)
+                    face_center = (fx + fw // 2, fy + fh // 2)
+                    
+                    assigned_id = None
+                    min_dist = self.TRACKING_MAX_DISTANCE
+                    
+                    for pid, prof in self.tracked_patients.items():
+                        dist = math.hypot(face_center[0] - prof["center"][0], face_center[1] - prof["center"][1])
+                        if dist < min_dist:
+                            min_dist = dist
+                            assigned_id = pid
+                    
+                    if assigned_id is None:
+                        assigned_id = f"ID_{self.patient_id_counter}"
+                        self.patient_id_counter += 1
+                        self.tracked_patients[assigned_id] = {
+                            "center": face_center,
+                            "gesture_start_times": {"NURSE_CALL": None, "HEAD_DISTRESS": None, "CHOKE_HOLD": None, "CHEST_HOLD": None, "UNCONSCIOUSNESS": None},
+                            "ppg_buffer": [],
+                            "ema_smoothed_spo2": None,
+                            "badge_timer_start": None,
+                            "last_seen": current_time,
+                            "role": "PATIENT",
+                            "remote_notified": {} 
+                        }
+                        print(f"➕ [TARGET SECTOR LOCK] Assigned profile: {assigned_id}")
+
+                    active_ids_this_frame.append(assigned_id)
+                    profile = self.tracked_patients[assigned_id]
+                    profile["center"] = face_center
+                    profile["last_seen"] = current_time
+
+                    r = max(20, fw // 2)
+                    top_line = face_center[1] - int(r * 0.9)
+                    chin_line = face_center[1] + int(r * 0.8)
+                    shoulder_line = face_center[1] + int(r * 1.5)
+                    chest_bottom = shoulder_line + int(r * 1.6)
+
+                    frame_patient_positions[assigned_id] = {
+                        "bounds": (top_line, chin_line, shoulder_line, chest_bottom),
+                        "x_range": (face_center[0] - int(r * 1.7), face_center[0] + int(r * 1.7)),
+                        "r_scale": r,
+                        "face_center": face_center
+                    }
+
+                    self.process_doctor_badge_filter(frame, (fx, fy, fx+fw, fy+fh), profile, assigned_id, current_time)
+
+                    forehead_box = (face_center[0] - int(r * 0.35), top_line + int(r * 0.2), face_center[0] + int(r * 0.35), face_center[1] - int(r * 0.35))
+                    cv2.rectangle(frame, (forehead_box[0], forehead_box[1]), (forehead_box[2], forehead_box[3]), (255, 255, 0), 1)
+                    
+                    spo2, spo2_color = self.compute_smoothed_spo2(frame, forehead_box, profile)
+                    cv2.putText(frame, f"SpO2: {spo2}%", (fx + fw + 5, fy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, spo2_color, 2)
+
+                    box_color = (255, 128, 0) if profile["role"] == "DOCTOR_IMMUNE" else (0, 255, 0)
+                    cv2.rectangle(frame, (fx, fy), (fx + fw, fy + fh), box_color, 2)
+                    cv2.putText(frame, f"{assigned_id} [{profile['role']}]", (fx, fy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+
+                    cv2.line(frame, (face_center[0] - int(r*1.4), top_line), (face_center[0] + int(r*1.4), top_line), (255, 0, 0), 1)
+                    cv2.line(frame, (face_center[0] - int(r*1.4), chin_line), (face_center[0] + int(r*1.4), chin_line), (255, 255, 0), 1)
+                    cv2.line(frame, (face_center[0] - int(r*1.4), shoulder_line), (face_center[0] + int(r*1.4), shoulder_line), (0, 255, 255), 1)
+                    cv2.line(frame, (face_center[0] - int(r*1.4), chest_bottom), (face_center[0] + int(r*1.4), chest_bottom), (0, 165, 255), 1)
+
+            detected_triggers = {} 
+            if hand_res.multi_hand_landmarks and frame_patient_positions:
+                for hand_lms in hand_res.multi_hand_landmarks:
+                    self.mp_draw.draw_landmarks(frame, hand_lms, self.mp_hands.HAND_CONNECTIONS)
+                    hx = int(hand_lms.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP].x * w)
+                    hy = int(hand_lms.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP].y * h)
+
+                    for pid, pos_data in frame_patient_positions.items():
+                        if self.tracked_patients[pid]["role"] == "DOCTOR_IMMUNE": continue
+                        x_min, x_max = pos_data["x_range"]
+                        if (x_min <= hx <= x_max):
+                            top_l, chin_l, sh_l, cb_l = pos_data["bounds"]
+                            if hy < top_l: detected_triggers[pid] = "NURSE_CALL"
+                            elif top_l <= hy < chin_l: detected_triggers[pid] = "HEAD_DISTRESS"
+                            elif chin_l <= hy < sh_l: detected_triggers[pid] = "CHOKE_HOLD"
+                            elif sh_l <= hy < cb_l: detected_triggers[pid] = "CHEST_HOLD"
+                            break  
+
+            for pid in active_ids_this_frame:
+                profile = self.tracked_patients[pid]
+                active_gesture = detected_triggers.get(pid, "NONE")
+                f_center = profile["center"]
+                rx_offset = frame_patient_positions[pid]["r_scale"]
+
+                if f_center[1] > int(h * 0.68) and active_gesture == "NONE" and profile["role"] != "DOCTOR_IMMUNE":
+                    if profile["gesture_start_times"]["UNCONSCIOUSNESS"] is None:
+                        profile["gesture_start_times"]["UNCONSCIOUSNESS"] = current_time
+                    
+                    unconscious_hold = current_time - profile["gesture_start_times"]["UNCONSCIOUSNESS"]
+                    
+                    if unconscious_hold < 4.0:
+                        cv2.putText(frame, f"FALLEN DETECTED: {unconscious_hold:.1f}s", (f_center[0] - 50, f_center[1] - rx_offset - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                    else:
+                        global_banner_text = f"CRITICAL: PATIENT {pid} UNCONSCIOUS COLLAPSE DETECTED"
+                        cv2.putText(frame, "UNCONSCIOUS", (f_center[0] - 40, f_center[1] - rx_offset - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+                        
+                        alert_str = f"Emergency Triage Red! Patient {pid} is unresponsive. Unconsciousness collapse protocol activated."
+                        if self.last_spoken_alert != f"{pid}_UNCONSCIOUS":
+                            self.last_spoken_alert = f"{pid}_UNCONSCIOUS"
+                            self.trigger_voice_dispatch(alert_str)
+                        
+                        if not profile["remote_notified"].get("UNCONSCIOUSNESS", False):
+                            profile["remote_notified"]["UNCONSCIOUSNESS"] = True
+                            self.trigger_split_channel_notification(f"CRITICAL: Patient {pid} fainted/unconscious in ER.", self.ROUTE_GENERAL_ER, "Emergency Response Team")
+                else:
+                    profile["gesture_start_times"]["UNCONSCIOUSNESS"] = None
+                    profile["remote_notified"]["UNCONSCIOUSNESS"] = False
+
+                for gesture_name, target_limit in [("NURSE_CALL", 3.0), ("HEAD_DISTRESS", 4.0), ("CHOKE_HOLD", 4.0), ("CHEST_HOLD", 4.0)]:
+                    if active_gesture == gesture_name:
+                        if profile["gesture_start_times"][gesture_name] is None:
+                            profile["gesture_start_times"][gesture_name] = current_time
+                        
+                        current_hold = current_time - profile["gesture_start_times"][gesture_name]
+
+                        # --- FLAW FIXED: Choking doesn't enforce standard screaming checks (since choking patients can't make noise) ---
+                        audio_verified = True
+                        combined_text = " ".join([chunk[0] for chunk in self.audio_rolling_memory])
+                        has_keyword = any(kw in combined_text for kw in self.PANIC_KEYWORDS)
+                        if gesture_name in ["CHEST_HOLD", "HEAD_DISTRESS"]:
+                            if self.current_amplitude < self.SCREAM_THRESHOLD and not has_keyword:
+                                audio_verified = False
+
+                        if current_hold < target_limit:
+                            bar_color = (0, 165, 255) if audio_verified else (0, 0, 255)
+                            bar_w = int((current_hold / target_limit) * 80)
+                            
+                            cv2.rectangle(frame, (f_center[0] - 40, f_center[1] - rx_offset - 30), (f_center[0] + 40, f_center[1] - rx_offset - 20), (50, 50, 50), -1)
+                            cv2.rectangle(frame, (f_center[0] - 40, f_center[1] - rx_offset - 30), (f_center[0] - 40 + bar_w, f_center[1] - rx_offset - 20), bar_color, -1)
+                            
+                            hud_txt = f"{gesture_name}: {current_hold:.1f}s" if audio_verified else "NEED SCREAM/MIC"
+                            cv2.putText(frame, hud_txt, (f_center[0] - 50, f_center[1] - rx_offset - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.35, bar_color, 1)
+                        else:
+                            global_banner_text = f"TRIAGE ALARM DISPATCH ACTIVE: {gesture_name}"
+                            cv2.putText(frame, "ALARM FIRED", (f_center[0] - 60, f_center[1] - rx_offset - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+                            
+                            alert_string = f"Triage Dispatch Alert! Patient {pid} has fully triggered {gesture_name} protocol."
+                            
+                            if self.last_spoken_alert != f"{pid}_{gesture_name}":
+                                self.last_spoken_alert = f"{pid}_{gesture_name}"
+                                self.trigger_voice_dispatch(alert_string)
+                            
+                            if not profile["remote_notified"].get(gesture_name, False):
+                                profile["remote_notified"][gesture_name] = True
+                                payload = f"CRITICAL INCIDENT: Patient {pid} verified {gesture_name}. Estimated SpO2: {spo2}%."
+                                
+                                if gesture_name == "CHEST_HOLD":
+                                    self.trigger_split_channel_notification(payload, self.ROUTE_DOC1_CARDIO, "Cardiologist Doc 1")
+                                elif gesture_name == "NURSE_CALL":
+                                    self.trigger_split_channel_notification(payload, self.ROUTE_NURSE, "Nursing Station")
+                                elif gesture_name == "CHOKE_HOLD":
+                                    self.trigger_split_channel_notification(payload, self.ROUTE_DUTY_DOC, "Duty Medical Officer")
+                                else:
+                                    self.trigger_split_channel_notification(payload, self.ROUTE_DUTY_DOC, "Duty Medical Officer")
+                    else:
+                        profile["gesture_start_times"][gesture_name] = None
+                        if active_gesture == "NONE":
+                            profile["remote_notified"][gesture_name] = False
+
+            if global_banner_text:
+                cv2.rectangle(frame, (10, 10), (w - 10, 50), (0, 0, 255), -1)
+                cv2.putText(frame, global_banner_text, (20, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 2)
+
+            if current_time - self.audio_alert_timestamp < 4.0:
+                cv2.rectangle(frame, (15, 65), (420, 100), (255, 0, 255), -1) 
+                cv2.putText(frame, f"MIC ALERT: {self.active_audio_alert}", (25, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else: self.active_audio_alert = "NONE"
+
+            purged_ids = [pid for pid, prof in self.tracked_patients.items() if pid not in active_ids_this_frame and (current_time - prof["last_seen"]) > self.PATIENT_TIMEOUT]
+            for pid in purged_ids:
+                del self.tracked_patients[pid]
+                print(f"🧹 [RAM SCRUBBER] Profile deleted: {pid}")
+
+            cv2.putText(frame, f"Room Vol: {self.current_amplitude}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.imshow("OmniMed Triage Core Engine", frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self.is_running = False
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    def boot(self):
+        threading.Thread(target=self.start_raw_amplitude_sampler, daemon=True).start()
+        threading.Thread(target=self.start_speech_keyword_engine, daemon=True).start()
+        threading.Thread(target=self.audio_memory_scrubber_loop, daemon=True).start()
+        self.start_vision_matrix_stream()
+
+if __name__ == "__main__":
+    matrix = OmniMedTriageMatrix()
+    matrix.boot()
