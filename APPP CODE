@@ -7,6 +7,13 @@ import mediapipe as mp
 import speech_recognition as sr
 from flask import Flask, render_template_string, jsonify, Response, request
 
+# Try to load voice engine silently
+try:
+    import pyttsx3
+    SPEECH_ENGINE_ACTIVE = True
+except ImportError:
+    SPEECH_ENGINE_ACTIVE = False
+
 # ==================== SYSTEM REGISTERS ====================
 app = Flask(__name__)
 frame_lock = threading.Lock()
@@ -25,22 +32,20 @@ LIVE_TELEMETRY = {
     "ai_lock_progress": 0
 }
 
-# ALARMS
+# REFINED CLINICAL ALARMS
 LIVE_TRIAGE_ALARMS = {
-    "CARDIAC_ARREST": {"active": False, "acknowledged": False},
-    "CHOKE_ALERT": {"active": False, "acknowledged": False},
+    "CHEST_DISTRESS": {"active": False, "acknowledged": False},
+    "BREATHING_DISTRESS": {"active": False, "acknowledged": False},
+    "HEAD_DISTRESS": {"active": False, "acknowledged": False},
     "FALL_COLLAPSE": {"active": False, "acknowledged": False},
     "NURSE_CALL": {"active": False, "acknowledged": False},
     "HYPOXIA_ALERT": {"active": False, "acknowledged": False}
 }
 
-# CHAT & TASKS
-CHAT_MESSAGES = [
-    {"time": "00:00:00", "sender": "SYSTEM", "target": "ALL", "msg": "OmniMed Secure Comms Initialized."}
-]
+# TARGETED DM CHAT LOGS
+CHAT_MESSAGES = [{"time": "00:00:00", "sender": "SYSTEM", "target": "ALL", "msg": "OmniMed Secure Comms Initialized."}]
 PHARMACY_ORDERS = []
 NURSE_TASKS = []
-
 LATEST_EVENTS = {"chat": 0, "pharmacy": 0, "alarm": 0}
 
 # ==================== ROBUST AUDIO ENGINE ====================
@@ -49,8 +54,9 @@ def voice_recognition_worker():
     mic = sr.Microphone()
     crisis_words = {
         "help": "NURSE_CALL", "nurse": "NURSE_CALL", 
-        "heart": "CARDIAC_ARREST", "chest": "CARDIAC_ARREST", 
-        "chok": "CHOKE_ALERT", "breathe": "CHOKE_ALERT"
+        "heart": "CHEST_DISTRESS", "chest": "CHEST_DISTRESS", 
+        "breathe": "BREATHING_DISTRESS", "choking": "BREATHING_DISTRESS",
+        "head": "HEAD_DISTRESS", "dizzy": "HEAD_DISTRESS"
     }
     
     print("[AUDIO CORE] Calibrating Microphone...")
@@ -78,7 +84,7 @@ def voice_recognition_worker():
                     break
         except Exception: pass
 
-# ==================== FLASK WEB APP (MOBILE-OPTIMIZED) ====================
+# ==================== FLASK WEB APP (CLINICAL UI) ====================
 MASTER_DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -89,7 +95,7 @@ MASTER_DASHBOARD_HTML = """
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@700;800&display=swap');
         
-        :root { --bg: #050505; --panel: #0d0d0d; --border: #222; --cyan: #00e5ff; --red: #ff2a55; --green: #00ff73; --amber: #ffaa00; --text: #ffffff; --text-muted: #777777; }
+        :root { --bg: #050505; --panel: #0d0d0d; --border: #222; --cyan: #00e5ff; --red: #ff2a55; --green: #00ff73; --amber: #ffaa00; --purple: #b000ff; --text: #ffffff; --text-muted: #777777; }
         * { box-sizing: border-box; }
         body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: var(--text); margin: 0; overflow-x: hidden;}
         .hidden { display: none !important; }
@@ -119,7 +125,7 @@ MASTER_DASHBOARD_HTML = """
         #critical_overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(255, 42, 85, 0.15); border: 8px solid var(--red); z-index: 9999; pointer-events: none; display: none; animation: flash 1s infinite; }
         @keyframes flash { 0% { opacity: 1; } 50% { opacity: 0.2; } 100% { opacity: 1; } }
         
-        /* RESPONSIVE APP GRID (FIXED FOR MOBILE APK) */
+        /* RESPONSIVE APP GRID */
         .grid-container { display: flex; flex-direction: column; gap: 15px; padding: 15px; width: 100%; max-width: 1800px; margin: 0 auto; }
         @media(min-width: 1024px) { 
             .grid-container { display: grid; grid-template-columns: 350px minmax(600px, 1fr) 400px; align-items: start;} 
@@ -137,7 +143,7 @@ MASTER_DASHBOARD_HTML = """
         .progress-fill.danger { background: var(--red); }
 
         /* INSTAGRAM-STYLE DM CHAT */
-        .chat-container { height: 300px; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; background: #050505;}
+        .chat-container { height: 350px; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; background: #050505; scroll-behavior: smooth;}
         .msg-wrap { display: flex; flex-direction: column; max-width: 90%; }
         .msg-sender { font-size: 10px; color: var(--text-muted); margin-bottom: 4px; font-weight: 800;}
         .msg-bubble { padding: 12px 16px; border-radius: 16px; font-size: 12px; line-height: 1.4; word-wrap: break-word; font-weight: 600;}
@@ -183,6 +189,8 @@ MASTER_DASHBOARD_HTML = """
         
         .btn-full { width: 100%; padding: 12px; margin-top: 12px; border: none; border-radius: 4px; font-family: 'Inter'; font-size: 11px; font-weight: 800; cursor: pointer; text-transform: uppercase; background: #222; color: #fff;}
         .danger .btn-full { background: var(--red); color: #fff; }
+        
+        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-thumb { background: #333; border-radius: 10px;}
     </style>
 </head>
 <body>
@@ -282,15 +290,20 @@ MASTER_DASHBOARD_HTML = """
                         <div class="alarm-status" id="t_hypoxia">Stable</div>
                         <button class="btn-full hidden" id="b_hypoxia" onclick="acknowledgeAlarm('HYPOXIA_ALERT')">Acknowledge</button>
                     </div>
-                    <div class="alarm-card" id="c_cardio">
-                        <div class="alarm-title">CARDIAC ARREST</div>
-                        <div class="alarm-status" id="t_cardio">Stable</div>
-                        <button class="btn-full hidden" id="b_cardio" onclick="acknowledgeAlarm('CARDIAC_ARREST')">Acknowledge</button>
+                    <div class="alarm-card" id="c_chest">
+                        <div class="alarm-title">CHEST DISTRESS</div>
+                        <div class="alarm-status" id="t_chest">Stable</div>
+                        <button class="btn-full hidden" id="b_chest" onclick="acknowledgeAlarm('CHEST_DISTRESS')">Acknowledge</button>
                     </div>
-                    <div class="alarm-card" id="c_choke">
-                        <div class="alarm-title">AIRWAY OBSTRUCTION</div>
-                        <div class="alarm-status" id="t_choke">Stable</div>
-                        <button class="btn-full hidden" id="b_choke" onclick="acknowledgeAlarm('CHOKE_ALERT')">Acknowledge</button>
+                    <div class="alarm-card" id="c_breathing">
+                        <div class="alarm-title">BREATHING DISTRESS</div>
+                        <div class="alarm-status" id="t_breathing">Stable</div>
+                        <button class="btn-full hidden" id="b_breathing" onclick="acknowledgeAlarm('BREATHING_DISTRESS')">Acknowledge</button>
+                    </div>
+                    <div class="alarm-card" id="c_head">
+                        <div class="alarm-title">HEAD DISTRESS</div>
+                        <div class="alarm-status" id="t_head">Stable</div>
+                        <button class="btn-full hidden" id="b_head" onclick="acknowledgeAlarm('HEAD_DISTRESS')">Acknowledge</button>
                     </div>
                     <div class="alarm-card" id="c_fall">
                         <div class="alarm-title">TRAUMATIC COLLAPSE</div>
@@ -439,8 +452,12 @@ MASTER_DASHBOARD_HTML = """
                         card.className = "alarm-card"; stat.innerText = data.alarms[data_key].acknowledged ? "Acknowledged" : "Stable"; btn.classList.add('hidden');
                     }
                 };
-                updateUIAlarm('hypoxia', 'HYPOXIA_ALERT'); updateUIAlarm('cardio', 'CARDIAC_ARREST'); 
-                updateUIAlarm('fall', 'FALL_COLLAPSE'); updateUIAlarm('choke', 'CHOKE_ALERT'); updateUIAlarm('nurse', 'NURSE_CALL');
+                updateUIAlarm('hypoxia', 'HYPOXIA_ALERT'); 
+                updateUIAlarm('chest', 'CHEST_DISTRESS'); 
+                updateUIAlarm('breathing', 'BREATHING_DISTRESS'); 
+                updateUIAlarm('head', 'HEAD_DISTRESS'); 
+                updateUIAlarm('fall', 'FALL_COLLAPSE'); 
+                updateUIAlarm('nurse', 'NURSE_CALL');
 
                 if(anyCritical && !isAlarming) {
                     isAlarming = true; document.getElementById('critical_overlay').style.display = "block"; startSiren();
@@ -462,7 +479,6 @@ MASTER_DASHBOARD_HTML = """
                     });
                     let chatBox = document.getElementById('chat_messages');
                     chatBox.innerHTML = chatHTML;
-                    // Auto-scroll fix
                     setTimeout(() => { chatBox.scrollTop = chatBox.scrollHeight; }, 50);
                     if(lastCounts.chat !== 0 && data.chats[data.chats.length-1].sender !== currentRole) playChime('msg');
                     lastCounts.chat = data.chats.length;
@@ -574,7 +590,7 @@ def hardware_buffer_cleaner(cap):
         if ret:
             with frame_lock: raw_camera_frame = frame
 
-# ==================== COMPUTER VISION CORE ====================
+# ==================== COMPUTER VISION CORE (ZONED GESTURES) ====================
 class OmniMedAIVision:
     def __init__(self):
         self.mp_holistic = mp.solutions.holistic
@@ -584,11 +600,12 @@ class OmniMedAIVision:
         self.pose_spec = self.mp_draw.DrawingSpec(color=(0, 210, 255), thickness=2, circle_radius=2)
         self.hand_spec = self.mp_draw.DrawingSpec(color=(0, 255, 118), thickness=1, circle_radius=2)
         
-        self.timers = {"NURSE_CALL": None, "CHOKE_ALERT": None, "CARDIAC_ARREST": None, "FALL_COLLAPSE": None}
+        self.timers = {"NURSE_CALL": None, "HEAD_DISTRESS": None, "BREATHING_DISTRESS": None, "CHEST_DISTRESS": None, "FALL_COLLAPSE": None}
         self.previous_joints = None
 
-    def get_distance(self, p1, p2, w, h):
-        return math.hypot((p1.x - p2.x) * w, (p1.y - p2.y) * h)
+    def draw_zone(self, frame, x1, y1, x2, y2, label):
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 100), 1)
+        cv2.putText(frame, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 100), 1)
 
     def run_engine(self):
         global latest_processed_frame, raw_camera_frame, is_system_running
@@ -614,12 +631,38 @@ class OmniMedAIVision:
                 self.mp_draw.draw_landmarks(frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS, self.pose_spec, self.pose_spec)
                 nodes = results.pose_landmarks.landmark
                 try:
-                    nose = nodes[0]; l_sh = nodes[11]; r_sh = nodes[12]; l_hip = nodes[23]; r_hip = nodes[24]; l_wrist = nodes[15]; r_wrist = nodes[16]
+                    # Point Extraction
+                    nose = nodes[0]
+                    l_eye = nodes[2]; r_eye = nodes[5]
+                    l_mouth = nodes[9]; r_mouth = nodes[10]
+                    l_sh = nodes[11]; r_sh = nodes[12]
+                    l_hip = nodes[23]; r_hip = nodes[24]
+                    l_wrist = nodes[15]; r_wrist = nodes[16]
 
-                    avg_sh_x, avg_sh_y = (l_sh.x + r_sh.x)/2 * w, (l_sh.y + r_sh.y)/2 * h
-                    avg_hip_x, avg_hip_y = (l_hip.x + r_hip.x)/2 * w, (l_hip.y + r_hip.y)/2 * h
+                    # Y-Axis Mapping (Top to Bottom)
+                    nose_y = nose.y * h
+                    eye_y = ((l_eye.y + r_eye.y) / 2) * h
+                    mouth_y = ((l_mouth.y + r_mouth.y) / 2) * h
                     
-                    angle = int(math.degrees(math.atan2(abs(avg_sh_x - avg_hip_x), abs(avg_hip_y - avg_sh_y))))
+                    head_top_y = int(eye_y - abs(mouth_y - eye_y) * 1.5)
+                    chin_y = int(mouth_y)
+                    shoulder_y = int(((l_sh.y + r_sh.y) / 2) * h)
+                    hip_y = int(((l_hip.y + r_hip.y) / 2) * h)
+                    chest_bottom_y = int(shoulder_y + (hip_y - shoulder_y) * 0.5)
+
+                    # X-Axis Mapping
+                    avg_sh_x = ((l_sh.x + r_sh.x) / 2) * w
+                    shoulder_w = abs(l_sh.x - r_sh.x) * w
+                    zone_x1 = int(avg_sh_x - shoulder_w * 0.6)
+                    zone_x2 = int(avg_sh_x + shoulder_w * 0.6)
+
+                    # Draw Anatomical Target Zones on Camera
+                    self.draw_zone(frame, zone_x1, head_top_y, zone_x2, chin_y, "HEAD ZONE")
+                    self.draw_zone(frame, zone_x1, chin_y, zone_x2, shoulder_y, "BREATHING ZONE")
+                    self.draw_zone(frame, zone_x1, shoulder_y, zone_x2, chest_bottom_y, "CHEST ZONE")
+
+                    # Telemetry Math
+                    angle = int(math.degrees(math.atan2(abs(avg_sh_x - ((l_hip.x + r_hip.x)/2 * w)), abs(hip_y - shoulder_y))))
                     LIVE_TELEMETRY["posture_angle"] = angle
 
                     curr_joints = np.array([[n.x, n.y] for n in [nose, l_sh, r_sh, l_wrist, r_wrist]])
@@ -628,23 +671,36 @@ class OmniMedAIVision:
                         LIVE_TELEMETRY["kinetic_activity"] = min(100, int(delta * 1200))
                     self.previous_joints = curr_joints
 
-                    shoulder_w = self.get_distance(l_sh, r_sh, w, h)
+                    # Clinical Zone Logic
+                    l_y, r_y = l_wrist.y * h, r_wrist.y * h
+                    l_x, r_x = l_wrist.x * w, r_wrist.x * w
                     
-                    is_nurse = (l_wrist.y < nose.y) or (r_wrist.y < nose.y)
-                    is_choking = (self.get_distance(l_wrist, nose, w, h) < shoulder_w * 0.6) or (self.get_distance(r_wrist, nose, w, h) < shoulder_w * 0.6)
-                    chest_c = type('Point', (), {'x': (l_sh.x+r_sh.x)/2, 'y': (l_sh.y+l_hip.y)/2})
-                    is_cardio = ((self.get_distance(l_wrist, chest_c, w, h) < shoulder_w * 0.6) or (self.get_distance(r_wrist, chest_c, w, h) < shoulder_w * 0.6)) and not is_choking
+                    is_central_l = zone_x1 < l_x < zone_x2
+                    is_central_r = zone_x1 < r_x < zone_x2
+
+                    # 1. Nurse Call (Above head top)
+                    is_nurse = (l_y < head_top_y) or (r_y < head_top_y)
+                    
+                    # 2. Head Distress (Between Top of Head and Chin)
+                    is_head = (not is_nurse) and ((head_top_y <= l_y < chin_y and is_central_l) or (head_top_y <= r_y < chin_y and is_central_r))
+                    
+                    # 3. Breathing Distress (Between Chin and Shoulder)
+                    is_breathing = (not is_nurse and not is_head) and ((chin_y <= l_y < shoulder_y and is_central_l) or (chin_y <= r_y < shoulder_y and is_central_r))
+                    
+                    # 4. Chest Distress (Between Shoulder and Chest Bottom)
+                    is_chest = (not is_nurse and not is_head and not is_breathing) and ((shoulder_y <= l_y < chest_bottom_y and is_central_l) or (shoulder_y <= r_y < chest_bottom_y and is_central_r))
+
                     is_falling = angle > 65
 
-                    if is_choking or is_falling: LIVE_TELEMETRY["spo2_level"] = max(82, LIVE_TELEMETRY["spo2_level"] - 1)
+                    # O2 Engine
+                    if is_breathing or is_falling: LIVE_TELEMETRY["spo2_level"] = max(82, LIVE_TELEMETRY["spo2_level"] - 1)
                     else: LIVE_TELEMETRY["spo2_level"] = min(99, LIVE_TELEMETRY["spo2_level"] + 1)
-                    
                     if LIVE_TELEMETRY["spo2_level"] < 90:
                         with database_lock:
                             if not LIVE_TRIAGE_ALARMS["HYPOXIA_ALERT"]["active"] and not LIVE_TRIAGE_ALARMS["HYPOXIA_ALERT"]["acknowledged"]:
                                 LIVE_TRIAGE_ALARMS["HYPOXIA_ALERT"]["active"] = True
 
-                    # BUG FIX: ONE-SHOT TIMER LOCK
+                    # ONE-SHOT TIMER LOCK
                     def process_gesture(key, condition, req_time=3.0):
                         nonlocal active_gesture, lock_progress
                         if condition and not LIVE_TRIAGE_ALARMS[key]["active"]:
@@ -663,17 +719,17 @@ class OmniMedAIVision:
                                     LIVE_TRIAGE_ALARMS[key]["acknowledged"] = False
                                     CHAT_MESSAGES.append({"time": time.strftime('%H:%M:%S'), "sender": "SYSTEM", "target": "ALL", "msg": f"CRITICAL ALARM: {key.replace('_', ' ')} DETECTED!"})
                                     LATEST_EVENTS["alarm"] += 1
-                                self.timers[key] = None # Clear timer immediately upon lock
+                                self.timers[key] = None # Clear timer
                         else:
                             if self.timers[key] is not None:
-                                self.timers[key] = None # Reset timer if dropped
+                                self.timers[key] = None # Reset immediately if dropped
 
                     if is_falling: process_gesture("FALL_COLLAPSE", is_falling)
-                    elif is_choking: process_gesture("CHOKE_ALERT", is_choking)
-                    elif is_cardio: process_gesture("CARDIAC_ARREST", is_cardio)
+                    elif is_chest: process_gesture("CHEST_DISTRESS", is_chest)
+                    elif is_breathing: process_gesture("BREATHING_DISTRESS", is_breathing)
+                    elif is_head: process_gesture("HEAD_DISTRESS", is_head)
                     elif is_nurse: process_gesture("NURSE_CALL", is_nurse, 2.0)
                     else:
-                        # Clear all if nothing detected
                         for k in self.timers.keys(): self.timers[k] = None
 
                 except Exception as e: pass
